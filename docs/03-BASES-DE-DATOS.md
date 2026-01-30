@@ -473,6 +473,59 @@ Apache Cassandra es una base de datos columnar distribuida, disenada para maneja
 3. **Alta disponibilidad**: Sin punto unico de falla
 4. **Consistencia eventual**: Ideal para auditoria donde no se requiere inmediatez
 
+### Inicializacion Automatica
+
+El backend inicializa automaticamente el schema de Cassandra al conectarse. Este proceso:
+
+1. **Conecta sin keyspace** para poder crear el keyspace si no existe
+2. **Crea el keyspace** `edugrade` con `SimpleStrategy` y `replication_factor: 1`
+3. **Crea la tabla** `eventos_auditoria` con la estructura de particionamiento temporal
+4. **Crea indices secundarios** para `tipo_evento`, `entidad` y `usuario_id`
+5. **Reconecta con el keyspace** para operaciones normales
+
+```javascript
+// backend/src/config/database.js - initCassandraSchema()
+const initCassandraSchema = async (client) => {
+  // Crear keyspace si no existe
+  await client.execute(`
+    CREATE KEYSPACE IF NOT EXISTS ${process.env.CASSANDRA_KEYSPACE}
+    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
+  `);
+
+  // Crear tabla de eventos de auditoria
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS eventos_auditoria (
+      evento_id UUID,
+      tipo_evento TEXT,
+      entidad TEXT,
+      entidad_id TEXT,
+      usuario_id TEXT,
+      datos TEXT,
+      ip TEXT,
+      timestamp TIMESTAMP,
+      anio INT,
+      mes INT,
+      PRIMARY KEY ((anio, mes), timestamp, evento_id)
+    ) WITH CLUSTERING ORDER BY (timestamp DESC, evento_id ASC)
+  `);
+
+  // Crear indices secundarios
+  await client.execute('CREATE INDEX IF NOT EXISTS idx_tipo_evento ON eventos_auditoria (tipo_evento)');
+  await client.execute('CREATE INDEX IF NOT EXISTS idx_entidad ON eventos_auditoria (entidad)');
+  await client.execute('CREATE INDEX IF NOT EXISTS idx_usuario ON eventos_auditoria (usuario_id)');
+};
+```
+
+**Nota sobre sintaxis CQL:** En las consultas con filtros adicionales, el `LIMIT` debe ir **antes** de `ALLOW FILTERING`:
+
+```cql
+-- Correcto
+SELECT * FROM eventos_auditoria WHERE anio = ? AND mes = ? LIMIT 100 ALLOW FILTERING;
+
+-- Incorrecto (genera error de sintaxis)
+SELECT * FROM eventos_auditoria WHERE anio = ? AND mes = ? ALLOW FILTERING LIMIT 100;
+```
+
 ### Keyspace
 
 ```cql

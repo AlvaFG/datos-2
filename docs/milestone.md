@@ -12,6 +12,8 @@
 
 ---
 
+## Ultima actualizacion: 2026-01-30
+
 ## Pre-Requisitos Verificados (2026-01-28)
 
 ### Herramientas Base
@@ -145,9 +147,10 @@ MCPs actualmente instalados y funcionando:
 | Rutas y Controllers | 31 | 31 | 0 | 0 |
 | Servicios Especializados | 20 | 20 | 0 | 0 |
 | Frontend | 20 | 20 | 0 | 0 |
+| Frontend CRUD Completo | 4 | 4 | 0 | 0 |
 | Scripts y Testing | 20 | 0 | 0 | 20 |
 | Documentacion | 10 | 0 | 0 | 10 |
-| **TOTAL** | **149** | **119** | **0** | **30** |
+| **TOTAL** | **153** | **123** | **0** | **30** |
 
 ---
 
@@ -202,5 +205,15 @@ MCPs actualmente instalados y funcionando:
   - Pages: Login, Dashboard, Estudiantes (CRUD), Calificaciones, Instituciones, Materias, Reportes
   - API Integration: Axios con JWT interceptors, React Query hooks, AuthContext
   - Corriendo en http://localhost:5173 con proxy al backend
-  - **UI Simplificada:** Las paginas de listado (Estudiantes, Calificaciones, Materias, Instituciones) solo permiten crear nuevos registros - no hay botones de editar/eliminar inline en las tablas
+  - **CRUD Completo (2026-01-30):** Todas las paginas de listado ahora tienen:
+    - Busqueda funcional conectada a la API
+    - Botones de editar (modal o navegacion)
+    - Botones de eliminar con confirmacion
+    - Soporte para edicion inline en Instituciones y Materias
+- ✅ Cassandra Auto-Init - El backend inicializa automaticamente keyspace y tablas al conectar
+- ✅ Auditoria COMPLETA - Todos los controladores principales registran eventos en Cassandra:
+  - Estudiantes: CREATE, UPDATE, DELETE
+  - Instituciones: CREATE, UPDATE, DELETE
+  - Materias: CREATE, UPDATE, DELETE
+  - Auth: LOGIN, LOGOUT
 - MCPs MongoDB y Neo4j funcionando - Cassandra sin MCP (usar docker exec)

@@ -709,6 +709,63 @@ Authorization: Bearer <token>
 | GET | /api/auditoria/usuario/:usuarioId | Acciones de usuario | Si (admin) |
 | GET | /api/auditoria/estadisticas | Estadisticas | Si (admin) |
 
+### Eventos de Auditoria por Modulo
+
+Los siguientes controladores registran eventos de auditoria automaticamente en Cassandra:
+
+| Modulo | Evento | Accion | Datos Registrados |
+|--------|--------|--------|-------------------|
+| **Estudiantes** | CREATE | Crear estudiante | nombre, apellido |
+| | UPDATE | Actualizar estudiante | campos modificados |
+| | DELETE | Eliminar (soft delete) | - |
+| **Instituciones** | CREATE | Crear institucion | nombre, codigo |
+| | UPDATE | Actualizar institucion | campos modificados |
+| | DELETE | Eliminar (soft delete) | - |
+| **Materias** | CREATE | Crear materia | nombre, codigo |
+| | UPDATE | Actualizar materia | campos modificados |
+| | DELETE | Eliminar (soft delete) | - |
+| **Auth** | LOGIN | Inicio de sesion | email |
+| | LOGOUT | Cierre de sesion | email |
+
+**Estructura del evento registrado:**
+
+```javascript
+{
+  eventoId: UUID,           // Identificador unico
+  tipoEvento: String,       // CREATE, UPDATE, DELETE, LOGIN, LOGOUT
+  entidad: String,          // estudiante, institucion, materia, usuario
+  entidadId: String,        // ID del registro afectado
+  usuarioId: String,        // Usuario que realizo la accion
+  datos: Object,            // Datos adicionales segun el tipo
+  ip: String,               // IP del cliente
+  timestamp: Date,          // Fecha/hora del evento
+  anio: Number,             // Año (para particionamiento)
+  mes: Number               // Mes (para particionamiento)
+}
+```
+
+**Ejemplo de implementacion en un controlador:**
+
+```javascript
+// estudiante.controller.js - Crear estudiante
+exports.create = async (req, res) => {
+  const estudiante = new Estudiante(req.body);
+  await estudiante.save();
+
+  // Registrar evento de auditoria
+  await auditoriaService.registrarEvento({
+    tipoEvento: 'CREATE',
+    entidad: 'estudiante',
+    entidadId: estudiante._id.toString(),
+    usuarioId: req.user?.id || 'sistema',
+    datos: { nombre: estudiante.nombre, apellido: estudiante.apellido },
+    ip: req.ip
+  });
+
+  res.status(201).json(estudiante);
+};
+```
+
 **Ejemplo: Eventos de Auditoria**
 
 ```bash
