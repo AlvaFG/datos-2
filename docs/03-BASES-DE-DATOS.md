@@ -63,12 +63,15 @@ ENFOQUE POLIGLOTA:
 
 MongoDB es una base de datos NoSQL orientada a documentos que almacena datos en formato BSON (Binary JSON).
 
+**Configuracion en EduGrade:** Replica Set de 3 nodos (`rs0`) — 1 Primary + 2 Secondaries. Las escrituras van al Primary y se replican automaticamente. Las lecturas se distribuyen con `readPreference: secondaryPreferred`. Si el Primary cae, se elige automaticamente un nuevo Primary por votacion.
+
 **Ventajas para EduGrade:**
 
 1. **Esquema flexible**: Diferentes sistemas de calificacion tienen estructuras distintas
 2. **Validacion nativa**: JSON Schema para garantizar integridad
 3. **Indices potentes**: Busquedas eficientes por multiples campos
 4. **Agregaciones**: Pipeline de agregacion para reportes complejos
+5. **Alta disponibilidad**: Replica Set de 3 nodos con failover automatico
 
 ### Colecciones
 
@@ -466,11 +469,13 @@ Accesible en: `http://localhost:7474`
 
 Apache Cassandra es una base de datos columnar distribuida, disenada para manejar grandes volumenes de datos con alta disponibilidad.
 
+**Configuracion en EduGrade:** Cluster de 3 nodos con `replication_factor: 3`. Cada dato se replica en los 3 nodos para maxima disponibilidad. Los nodos se comunican via gossip protocol y no existe un punto unico de falla.
+
 **Ventajas para EduGrade:**
 
 1. **Escritura masiva**: Optimizada para inserciones append-only
 2. **Particionamiento**: Distribuye datos por tiempo automaticamente
-3. **Alta disponibilidad**: Sin punto unico de falla
+3. **Alta disponibilidad**: Cluster de 3 nodos, tolera 1 caida sin impacto
 4. **Consistencia eventual**: Ideal para auditoria donde no se requiere inmediatez
 
 ### Inicializacion Automatica
@@ -478,7 +483,7 @@ Apache Cassandra es una base de datos columnar distribuida, disenada para maneja
 El backend inicializa automaticamente el schema de Cassandra al conectarse. Este proceso:
 
 1. **Conecta sin keyspace** para poder crear el keyspace si no existe
-2. **Crea el keyspace** `edugrade` con `SimpleStrategy` y `replication_factor: 1`
+2. **Crea el keyspace** `edugrade` con `SimpleStrategy` y `replication_factor: 3` (replicado en los 3 nodos del cluster)
 3. **Crea la tabla** `eventos_auditoria` con la estructura de particionamiento temporal
 4. **Crea indices secundarios** para `tipo_evento`, `entidad` y `usuario_id`
 5. **Reconecta con el keyspace** para operaciones normales
@@ -489,7 +494,7 @@ const initCassandraSchema = async (client) => {
   // Crear keyspace si no existe
   await client.execute(`
     CREATE KEYSPACE IF NOT EXISTS ${process.env.CASSANDRA_KEYSPACE}
-    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
+    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 3}
   `);
 
   // Crear tabla de eventos de auditoria
@@ -532,7 +537,7 @@ SELECT * FROM eventos_auditoria WHERE anio = ? AND mes = ? ALLOW FILTERING LIMIT
 CREATE KEYSPACE IF NOT EXISTS edugrade
 WITH replication = {
   'class': 'SimpleStrategy',
-  'replication_factor': 1  -- 3 en produccion
+  'replication_factor': 3  -- Replicado en los 3 nodos del cluster
 };
 ```
 
@@ -875,13 +880,14 @@ const cassandra = require('cassandra-driver');
 const Redis = require('ioredis');
 
 // ============================================
-// MongoDB Connection
+// MongoDB Connection (Replica Set rs0)
 // ============================================
 const connectMongoDB = async () => {
   await mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 10,              // Maximo conexiones en pool
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
+    readPreference: 'secondaryPreferred', // Distribuye lecturas a los secondaries
   });
   console.log('MongoDB conectado');
 };
@@ -1033,12 +1039,12 @@ const getTrayectoriaCompleta = async (estudianteId) => {
 
 ## Resumen de Bases de Datos
 
-| Base | Modelo | Puerto | Caso de Uso | Herramienta de Consulta |
-|------|--------|--------|-------------|------------------------|
-| MongoDB | Documentos | 27017 | Datos principales | MongoDB Compass, mongosh |
-| Neo4j | Grafos | 7687 | Relaciones | Neo4j Browser (7474) |
-| Cassandra | Columnar | 9042 | Auditoria | cqlsh, DataStax Studio |
-| Redis | Key-Value | 6379 | Cache | redis-cli, Redis Insight |
+| Base | Modelo | Puertos | Nodos | Caso de Uso | Herramienta de Consulta |
+|------|--------|---------|-------|-------------|------------------------|
+| MongoDB | Documentos | 27017-27019 | 3 (Replica Set) | Datos principales | MongoDB Compass, mongosh |
+| Neo4j | Grafos | 7687 | 1 | Relaciones | Neo4j Browser (7474) |
+| Cassandra | Columnar | 9042-9044 | 3 (Cluster) | Auditoria | cqlsh, DataStax Studio |
+| Redis | Key-Value | 6379 | 1 | Cache | redis-cli, Redis Insight |
 
 ---
 

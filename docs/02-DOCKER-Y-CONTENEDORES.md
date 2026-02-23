@@ -87,12 +87,41 @@ volumes:
 
 ## Servicios del Sistema
 
-### 1. MongoDB - Registro Academico (RF1)
+### 1. MongoDB Replica Set - Registro Academico (RF1)
+
+MongoDB corre como un **Replica Set de 3 nodos** (`rs0`) para alta disponibilidad y tolerancia a fallos.
+
+```
+                    ┌─────────────────────────┐
+  Escrituras ──────►│  PRIMARY (27017)        │
+                    │  mongodb-primary         │
+                    └──────┬──────┬───────────┘
+                           │      │
+                    copia  │      │  copia
+                           ▼      ▼
+              ┌──────────────────┐ ┌──────────────────┐
+              │ SECONDARY1       │ │ SECONDARY2       │
+              │ (27018)          │ │ (27019)          │
+              └──────────────────┘ └──────────────────┘
+                    ▲                     ▲
+                    └───── Lecturas ──────┘
+```
+
+**Nodos del Replica Set:**
+
+| Servicio | Contenedor | Puerto | Rol |
+|----------|------------|--------|-----|
+| `mongodb-primary` | edugrade-mongodb-primary | 27017 | Primario - recibe escrituras |
+| `mongodb-secondary1` | edugrade-mongodb-secondary1 | 27018 | Secundario - replica de lectura |
+| `mongodb-secondary2` | edugrade-mongodb-secondary2 | 27019 | Secundario - replica de lectura |
+| `mongodb-rs-init` | edugrade-mongodb-rs-init | - | Temporal - inicializa el replica set y termina |
+
+**Configuracion del nodo primario:**
 
 ```yaml
-mongodb:
+mongodb-primary:
   image: mongo:7.0
-  container_name: edugrade-mongodb
+  container_name: edugrade-mongodb-primary
   restart: unless-stopped
   ports:
     - "27017:27017"
@@ -100,28 +129,29 @@ mongodb:
     MONGO_INITDB_ROOT_USERNAME: admin
     MONGO_INITDB_ROOT_PASSWORD: edugrade2024
     MONGO_INITDB_DATABASE: edugrade
+  entrypoint: ["/bin/bash", "-c", "cp /etc/mongo/replica.key.orig /etc/mongo/replica.key && chmod 400 /etc/mongo/replica.key && chown 999:999 /etc/mongo/replica.key && exec docker-entrypoint.sh mongod --replSet rs0 --keyFile /etc/mongo/replica.key --bind_ip_all"]
   volumes:
     - mongodb_data:/data/db
     - ./docker/mongodb/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
-  networks:
-    - edugrade-network
-  healthcheck:
-    test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-    interval: 10s
-    timeout: 5s
-    retries: 5
+    - ./docker/mongodb/replica.key:/etc/mongo/replica.key.orig:ro
 ```
 
-**Explicacion de parametros:**
+**Como funciona la replicacion:**
 
-| Parametro | Valor | Proposito |
-|-----------|-------|-----------|
-| `image` | mongo:7.0 | Imagen oficial de MongoDB version 7.0 |
-| `container_name` | edugrade-mongodb | Nombre identificable del contenedor |
-| `restart` | unless-stopped | Reinicia automaticamente excepto si se detiene manualmente |
-| `ports` | 27017:27017 | Mapea puerto del host al contenedor |
-| `environment` | MONGO_INITDB_* | Variables de inicializacion de MongoDB |
-| `volumes` | mongodb_data, init-mongo.js | Persistencia de datos y script de inicio |
+1. Los 3 nodos arrancan con `--replSet rs0` y comparten un `replica.key` para autenticacion interna
+2. El contenedor `mongodb-rs-init` ejecuta `rs.initiate()` con los 3 miembros y termina (Exited 0 es normal)
+3. Las escrituras van siempre al **Primary**
+4. El Primary replica los datos a los Secondaries automaticamente
+5. Las lecturas se distribuyen con `readPreference: secondaryPreferred`
+6. Si el Primary cae, los otros 2 nodos votan y eligen un nuevo Primary automaticamente
+
+**Archivos de soporte:**
+
+| Archivo | Proposito |
+|---------|-----------|
+| `docker/mongodb/replica.key` | Keyfile para autenticacion entre nodos del replica set |
+| `docker/mongodb/init-replica.sh` | Script que espera al primary y ejecuta `rs.initiate()` |
+| `docker/mongodb/init-mongo.js` | Script de inicializacion (indices, schemas) - solo corre en el primario |
 
 ### 2. Neo4j - Trayectorias Academicas (RF3)
 
@@ -168,7 +198,33 @@ neo4j:
 +-------------------+
 ```
 
-### 3. Cassandra - Auditoria y Analitica (RF4/RF5)
+### 3. Cassandra Cluster - Auditoria y Analitica (RF4/RF5)
+
+Cassandra corre como un **cluster de 3 nodos** con `replication_factor: 3` para alta disponibilidad.
+
+```
+              ┌──────────────────┐
+              │  SEED NODE       │
+              │  cassandra:9042  │
+              └──────┬───────────┘
+                     │ gossip protocol
+          ┌──────────┴──────────┐
+          ▼                     ▼
+  ┌──────────────┐    ┌──────────────┐
+  │  NODE 2      │    │  NODE 3      │
+  │  :9043       │    │  :9044       │
+  └──────────────┘    └──────────────┘
+```
+
+**Nodos del cluster:**
+
+| Servicio | Contenedor | Puerto | Rol |
+|----------|------------|--------|-----|
+| `cassandra` | edugrade-cassandra | 9042 | Seed node |
+| `cassandra-node2` | edugrade-cassandra-node2 | 9043 | Nodo replica |
+| `cassandra-node3` | edugrade-cassandra-node3 | 9044 | Nodo replica |
+
+**Configuracion del seed node:**
 
 ```yaml
 cassandra:
@@ -187,14 +243,17 @@ cassandra:
   volumes:
     - cassandra_data:/var/lib/cassandra
     - ./docker/cassandra/init-cassandra.cql:/docker-entrypoint-initdb.d/init.cql:ro
-  networks:
-    - edugrade-network
-  healthcheck:
-    test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
-    interval: 30s
-    timeout: 10s
-    retries: 10
 ```
+
+Los nodos 2 y 3 usan `CASSANDRA_SEEDS: cassandra` para unirse al cluster y dependen del seed node con healthcheck.
+
+**Como funciona la replicacion:**
+
+1. Cassandra **no tiene primary/secondary** — todos los nodos son iguales (peer-to-peer)
+2. El **seed node** solo sirve para que los nuevos nodos descubran el cluster
+3. Cada dato se replica en **3 nodos** (`replication_factor: 3`)
+4. Los nodos se comunican con el **gossip protocol** para compartir el estado del cluster
+5. Si un nodo cae, los otros 2 siguen sirviendo las consultas sin interrupcion
 
 **Configuracion de Cassandra:**
 
@@ -204,7 +263,8 @@ cassandra:
 | `CASSANDRA_DC` | datacenter1 | Datacenter logico |
 | `CASSANDRA_RACK` | rack1 | Rack dentro del datacenter |
 | `CASSANDRA_ENDPOINT_SNITCH` | GossipingPropertyFileSnitch | Estrategia de descubrimiento de nodos |
-| `MAX_HEAP_SIZE` | 512M | Memoria maxima de JVM |
+| `CASSANDRA_SEEDS` | cassandra | Nodo semilla para unirse al cluster (nodos 2 y 3) |
+| `MAX_HEAP_SIZE` | 512M | Memoria maxima de JVM (~512MB por nodo, 1.5GB total) |
 | `HEAP_NEWSIZE` | 100M | Memoria para objetos nuevos |
 
 ### 4. Redis - Cache y Sesiones (RF2)
@@ -251,14 +311,14 @@ backend:
     NODE_ENV: development
     PORT: 3000
     DOCKER_ENV: "true"
-    # MongoDB
-    MONGODB_URI: mongodb://admin:edugrade2024@mongodb:27017/edugrade?authSource=admin
+    # MongoDB (Replica Set de 3 nodos)
+    MONGODB_URI: mongodb://admin:edugrade2024@mongodb-primary:27017,mongodb-secondary1:27017,mongodb-secondary2:27017/edugrade?authSource=admin&replicaSet=rs0
     # Neo4j
     NEO4J_URI: bolt://neo4j:7687
     NEO4J_USER: neo4j
     NEO4J_PASSWORD: edugrade2024
-    # Cassandra
-    CASSANDRA_CONTACT_POINTS: cassandra
+    # Cassandra (Cluster de 3 nodos)
+    CASSANDRA_CONTACT_POINTS: cassandra,cassandra-node2,cassandra-node3
     CASSANDRA_LOCAL_DC: datacenter1
     CASSANDRA_KEYSPACE: edugrade
     # Redis
@@ -281,13 +341,14 @@ backend:
 
 **Variables de conexion a bases de datos:**
 
-Notar que las URIs usan los **nombres de los servicios** (mongodb, neo4j, cassandra, redis) en lugar de localhost. Docker resuelve estos nombres internamente.
+Las URIs usan los **nombres de los servicios** en lugar de localhost. Docker resuelve estos nombres internamente. Para las bases replicadas, se listan todos los nodos:
 
 ```
-Host local:     mongodb://localhost:27017
-Dentro Docker:  mongodb://mongodb:27017
-                         ^^^^^^^
-                         Nombre del servicio
+MongoDB (Replica Set):
+  mongodb://admin:...@mongodb-primary:27017,mongodb-secondary1:27017,mongodb-secondary2:27017/edugrade?replicaSet=rs0
+
+Cassandra (Cluster):
+  CASSANDRA_CONTACT_POINTS: cassandra,cassandra-node2,cassandra-node3
 ```
 
 ### 6. Frontend - React SPA
@@ -408,15 +469,23 @@ CON VOLUMEN:
 
 ```yaml
 volumes:
-  mongodb_data:    # Datos de MongoDB
+  mongodb_data:              # MongoDB Primary
     driver: local
-  neo4j_data:      # Datos de Neo4j
+  mongodb_secondary1_data:   # MongoDB Secondary 1
     driver: local
-  neo4j_logs:      # Logs de Neo4j
+  mongodb_secondary2_data:   # MongoDB Secondary 2
     driver: local
-  cassandra_data:  # Datos de Cassandra
+  neo4j_data:                # Datos de Neo4j
     driver: local
-  redis_data:      # Datos de Redis
+  neo4j_logs:                # Logs de Neo4j
+    driver: local
+  cassandra_data:            # Cassandra Seed Node
+    driver: local
+  cassandra_node2_data:      # Cassandra Node 2
+    driver: local
+  cassandra_node3_data:      # Cassandra Node 3
+    driver: local
+  redis_data:                # Datos de Redis
     driver: local
 ```
 
@@ -424,10 +493,14 @@ volumes:
 
 | Servicio | Volumen | Path en Contenedor | Contenido |
 |----------|---------|-------------------|-----------|
-| MongoDB | mongodb_data | /data/db | Bases de datos |
+| MongoDB Primary | mongodb_data | /data/db | Bases de datos (primario) |
+| MongoDB Secondary1 | mongodb_secondary1_data | /data/db | Replica de datos |
+| MongoDB Secondary2 | mongodb_secondary2_data | /data/db | Replica de datos |
 | Neo4j | neo4j_data | /data | Grafos |
 | Neo4j | neo4j_logs | /logs | Logs de Neo4j |
-| Cassandra | cassandra_data | /var/lib/cassandra | SSTables |
+| Cassandra (seed) | cassandra_data | /var/lib/cassandra | SSTables |
+| Cassandra Node 2 | cassandra_node2_data | /var/lib/cassandra | SSTables replica |
+| Cassandra Node 3 | cassandra_node3_data | /var/lib/cassandra | SSTables replica |
 | Redis | redis_data | /data | AOF y RDB |
 
 ### Bind Mounts para Desarrollo
@@ -462,13 +535,14 @@ Estado del Contenedor:
 
 ### Health Checks por Servicio
 
-**MongoDB:**
+**MongoDB Primary:**
 ```yaml
 healthcheck:
-  test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-  interval: 10s    # Cada 10 segundos
-  timeout: 5s      # Timeout de 5 segundos
-  retries: 5       # 5 intentos antes de unhealthy
+  test: ["CMD", "mongosh", "-u", "admin", "-p", "edugrade2024", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+  interval: 10s       # Cada 10 segundos
+  timeout: 5s         # Timeout de 5 segundos
+  retries: 10         # 10 intentos antes de unhealthy
+  start_period: 30s   # Espera 30s antes de iniciar checks
 ```
 
 **Neo4j:**
@@ -504,8 +578,8 @@ healthcheck:
 ```yaml
 backend:
   depends_on:
-    mongodb:
-      condition: service_healthy   # Espera a que MongoDB este healthy
+    mongodb-primary:
+      condition: service_healthy   # Espera a que MongoDB Primary este healthy
     neo4j:
       condition: service_healthy   # Espera a que Neo4j este healthy
     redis:
@@ -515,12 +589,17 @@ backend:
 Flujo de inicio:
 
 ```
-1. Docker inicia MongoDB, Neo4j, Redis, Cassandra
+1. Docker inicia MongoDB Primary, Neo4j, Redis, Cassandra (seed)
 2. Health checks comienzan a ejecutarse
-3. Cuando MongoDB, Neo4j y Redis estan "healthy"
-4. Docker inicia Backend
-5. Cuando Backend esta corriendo
-6. Docker inicia Frontend
+3. Cuando MongoDB Primary esta "healthy":
+   - Inician MongoDB Secondary1 y Secondary2
+   - Inicia mongodb-rs-init (inicializa replica set y termina)
+4. Cuando Cassandra (seed) esta "healthy":
+   - Inician cassandra-node2 y cassandra-node3
+5. Cuando MongoDB Primary, Neo4j y Redis estan "healthy":
+   - Docker inicia Backend
+6. Cuando Backend esta corriendo:
+   - Docker inicia Frontend
 ```
 
 ---
@@ -655,14 +734,20 @@ docker compose exec backend npm test
 # Abrir shell en contenedor
 docker compose exec backend sh
 
-# Conectar a MongoDB
-docker compose exec mongodb mongosh -u admin -p edugrade2024
+# Conectar a MongoDB Primary
+docker compose exec mongodb-primary mongosh -u admin -p edugrade2024
+
+# Verificar estado del Replica Set
+docker exec edugrade-mongodb-primary mongosh -u admin -p edugrade2024 --eval "rs.status()"
 
 # Conectar a Redis
 docker compose exec redis redis-cli -a edugrade2024
 
 # Ejecutar CQL en Cassandra
 docker compose exec cassandra cqlsh -e "SELECT * FROM edugrade.eventos_auditoria LIMIT 5"
+
+# Verificar estado del cluster Cassandra
+docker exec edugrade-cassandra nodetool status
 ```
 
 ### Mantenimiento
@@ -709,10 +794,14 @@ docker volume inspect edugrade-global_mongodb_data
 
 | Servicio | Puerto Host | Puerto Contenedor | Protocolo |
 |----------|-------------|-------------------|-----------|
-| MongoDB | 27017 | 27017 | TCP (MongoDB Wire) |
+| MongoDB Primary | 27017 | 27017 | TCP (MongoDB Wire) |
+| MongoDB Secondary1 | 27018 | 27017 | TCP (MongoDB Wire) |
+| MongoDB Secondary2 | 27019 | 27017 | TCP (MongoDB Wire) |
 | Neo4j Browser | 7474 | 7474 | HTTP |
 | Neo4j Bolt | 7687 | 7687 | Bolt |
-| Cassandra | 9042 | 9042 | CQL |
+| Cassandra (seed) | 9042 | 9042 | CQL |
+| Cassandra Node 2 | 9043 | 9042 | CQL |
+| Cassandra Node 3 | 9044 | 9042 | CQL |
 | Redis | 6379 | 6379 | RESP |
 | Backend | 3000 | 3000 | HTTP |
 | Frontend | 5173 | 5173 | HTTP |
